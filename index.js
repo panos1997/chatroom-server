@@ -32,12 +32,45 @@ const db = mysql.createPool({
 //     host: 'localhost',
 //     user: 'root',
 //     password: 'password',
-//     database: 'chatroom'
+//     database: 'chatroom' 
 // });
 
 let messagesPerConnection = {};
 
-const userLeftRoom = (user, room) => {
+const avatarColors = [
+    'red',
+    'green',
+    'orange',
+    'yellow',
+    'blue',
+    'grey',
+    'pink',
+    'purple',
+    'black',
+    'white'
+]
+
+app.get('/getUsersInChat/:roomChatName', (request, response) => {
+    const roomChatName = request.params.roomChatName;
+
+    const getChatRoomQuery = `SELECT * FROM chatroom WHERE name='${roomChatName}'`;
+
+    db.query(getChatRoomQuery, (err, res) => {
+        if(err) console.log(err);
+        
+        const foundChatRoom = res[0];
+
+        if(!foundChatRoom) return;
+
+        let allUsersInChat = JSON.parse(foundChatRoom.users).users; 
+        
+        console.log('the users in the chat are: ', allUsersInChat);
+
+        return response.status(200).json(allUsersInChat)
+    });
+});
+
+const userLeftRoom = (user, room, socket) => {
     console.log('user left room');
 
     const roomName = room.name;
@@ -68,6 +101,8 @@ const userLeftRoom = (user, room) => {
                 db.query(updateQuery, [JSON.stringify({users: newUsers})], (error, result) => {
                     console.log(error);
                 });
+
+                socket.to(roomName).emit('someone_joined_or_left', newUsers);
             }
         }
     });
@@ -76,20 +111,12 @@ const userLeftRoom = (user, room) => {
 io.on('connection', (socket) => {
     console.log(`user with id: ${socket.id} connected`);
 
-    // TODO: get all users and send them to frontend
-    // socket.on('get_all_users_in_room', (room) => {
-    //     const getChatRoomQuery = `SELECT * FROM chatroom WHERE name='${room.name}'`;
-
-    //     db.query(getChatRoomQuery, (err, res) => {
-    //         const chatRoom = res[0];
-    //     });
-    // });
-
     socket.on('join_room', (data) => {
         console.log('data: ', data);
         socket.join(data.room.name);
 
         const roomName = data.room.name;
+        let currentUser = data.user;        
         
         socket.user = data.user;
         socket.room = data.room;
@@ -105,24 +132,41 @@ io.on('connection', (socket) => {
 
             // if chatroom does not exist in db, create it
             if(!foundChatRoom) {
-                const users = JSON.stringify({users: [data.user]});
+                currentUser = {
+                    ...currentUser, 
+                    avatarColor: avatarColors[0]
+                };
+
+                const users = JSON.stringify({users: [currentUser]});
                 const insertQuery = `INSERT INTO chatroom (name, users) VALUES (?, ?)`;
+
                 return db.query(insertQuery, [roomName, users], (err, res) => {
                     console.log(err);
-                    socket.emit('joined_room', !err); 
+                    socket.emit('joined_room', {joined: !err, user: currentUser, room: {name: roomName}}); 
                 });
             } 
             
             // update db with the user that joined the chatroom
             let newUsers = JSON.parse(foundChatRoom.users).users; 
-            newUsers.push(data.user);
+            const avatarColorsUsed = newUsers.map(user => user.avatarColor);
+                        
+            avatarColors.every(color => {
+               if(!avatarColorsUsed.includes(color)) {
+                   currentUser = {...currentUser, avatarColor: color};
+                   return false;
+               } else return true;
+            });
 
-            if(newUsers.length > 2) return socket.emit('joined_room', false);
+            newUsers.push(currentUser);
 
+            if(newUsers.length > 10) return socket.emit('joined_room', {joined: false, user: currentUser, room: foundChatRoom});
+            
             const updateQuery = `UPDATE chatroom SET users=(?) WHERE name='${roomName}'`; 
+
             db.query(updateQuery, [JSON.stringify({users: newUsers})], (error, result) => {
                 console.log(error);
-                socket.emit('joined_room', !error);
+                socket.emit('joined_room', {joined: !error, user: currentUser, room: foundChatRoom});
+                socket.to(roomName).emit('someone_joined_or_left', newUsers);
             });
         });
     });
@@ -138,11 +182,11 @@ io.on('connection', (socket) => {
         socket.emit('receive_all_messages', []);
     });
 
-    socket.on('left_room', ({user, room}) => userLeftRoom(user, room));
+    socket.on('left_room', ({user, room}) => socket && userLeftRoom(user, room, socket));
 
     socket.on('disconnect', async () => {
         // when user disconnects for any reason (even page refresh), we want the user to be removed from this chatroom in db
-        socket.room && userLeftRoom(socket.user, socket.room);
+        socket.room && userLeftRoom(socket.user, socket.room, socket);
     });
 });
 

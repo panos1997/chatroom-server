@@ -24,7 +24,8 @@ const db = mysql.createPool({
     host: 'eu-cdbr-west-02.cleardb.net',
     user: 'b16417fa1e8fed',
     password: '12f0f41f',
-    database: 'heroku_2e96bb5ce85b3ae'
+    database: 'heroku_2e96bb5ce85b3ae',
+    charset : 'utf8mb4'
 });
 
 // local db
@@ -32,10 +33,9 @@ const db = mysql.createPool({
 //     host: 'localhost',
 //     user: 'root',
 //     password: 'password',
-//     database: 'chatroom' 
+//     database: 'chatroom',
+//     charset : 'utf8mb4'
 // });
-
-let messagesPerConnection = {};
 
 const avatarColors = [
     'red',
@@ -120,10 +120,6 @@ io.on('connection', (socket) => {
         
         socket.user = data.user;
         socket.room = data.room;
-        
-        if(!messagesPerConnection[data.roomName]) messagesPerConnection[roomName] = [];
-        
-        socket.emit('receive_all_messages', messagesPerConnection[roomName]);
 
         const getChatRoomQuery = `SELECT * FROM chatroom WHERE name='${roomName}'`;
 
@@ -138,14 +134,15 @@ io.on('connection', (socket) => {
                 };
 
                 const users = JSON.stringify({users: [currentUser]});
-                const insertQuery = `INSERT INTO chatroom (name, users) VALUES (?, ?)`;
+                const messages = JSON.stringify({messages: []});
+                const insertQuery = `INSERT INTO chatroom (name, users, messages) VALUES (?, ?, ?)`;
 
-                return db.query(insertQuery, [roomName, users], (err, res) => {
+                return db.query(insertQuery, [roomName, users, messages], (err, res) => {
                     console.log(err);
                     socket.emit('joined_room', {joined: !err, user: currentUser, room: {name: roomName}}); 
                 });
             } 
-            
+                    
             // update db with the user that joined the chatroom
             let newUsers = JSON.parse(foundChatRoom.users).users; 
             const avatarColorsUsed = newUsers.map(user => user.avatarColor);
@@ -167,20 +164,70 @@ io.on('connection', (socket) => {
                 console.log(error);
                 socket.emit('joined_room', {joined: !error, user: currentUser, room: foundChatRoom});
                 socket.to(roomName).emit('someone_joined_or_left', newUsers);
+                socket.emit('receive_all_messages', JSON.parse(foundChatRoom.messages) ? JSON.parse(foundChatRoom.messages).messages : []);
             });
         });
     });
 
     socket.on('send_message', (data) => {
         const roomName = data.room.name;
-        if(messagesPerConnection[roomName].length < 300) messagesPerConnection[roomName].push(data);
-        socket.to(roomName).emit('receive_message', data);
+        const getChatRoomQuery = `SELECT * FROM chatroom WHERE name='${roomName}'`;
+
+        db.query(getChatRoomQuery, (error, result) => {
+            console.log(error);
+            const foundChatRoom = result[0]; 
+            
+            let messages = JSON.parse(foundChatRoom.messages) ? JSON.parse(foundChatRoom.messages).messages : [];
+            messages.push(data.message);
+
+            const updateQuery = `UPDATE chatroom SET messages=(?) WHERE name='${roomName}'`; 
+
+            db.query(updateQuery, [JSON.stringify({messages: messages})], (err, res) => {
+                console.log(err);
+                
+                console.log('about to send: ', data.message, roomName);
+
+                socket.to(roomName).emit('receive_message', data.message);
+            });
+        });
+    });
+
+    socket.on('delete_message', (data) => {
+        const roomName = data.room.name;
+        const messageIndex = data.messageIndex;
+
+        const getChatRoomQuery = `SELECT * FROM chatroom WHERE name='${roomName}'`;
+
+        db.query(getChatRoomQuery, (error, result) => {
+            console.log(error);
+            const foundChatRoom = result[0]; 
+            
+            let messages = JSON.parse(foundChatRoom.messages) ? JSON.parse(foundChatRoom.messages).messages : [];
+
+            console.log('message to delete: ', messages[messageIndex]);
+
+            messages.splice(messageIndex, 1);
+
+            const updateQuery = `UPDATE chatroom SET messages=(?) WHERE name='${roomName}'`; 
+
+            db.query(updateQuery, [JSON.stringify({messages: messages})], (err, res) => {
+                console.log(err);
+                socket.emit('receive_all_messages', messages);
+                socket.to(roomName).emit('receive_all_messages', messages);
+            });
+        });
+
+        console.log('data: ', data);
     });
 
     socket.on('clear_all_messages', room => {
-        messagesPerConnection[room.name] = [];
-        socket.emit('receive_all_messages', []);
-    });
+        const updateQuery = `UPDATE chatroom SET messages=(?) WHERE name='${room.name}'`; 
+
+        db.query(updateQuery, [JSON.stringify({messages: []})], (err, res) => { 
+            console.log(err);
+            socket.emit('receive_all_messages', []); 
+        });
+    }); 
 
     socket.on('left_room', ({user, room}) => socket && userLeftRoom(user, room, socket));
 
